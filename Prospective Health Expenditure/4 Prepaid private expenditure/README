@@ -1,0 +1,10 @@
+# PPP Forecasts 
+
+### Data specifications for FGH 2024/2025:
+* Variables: PPP
+* Number of countries: 204
+* Number of subnats: 0
+* Years: 1995-2050, with the last year of retrospective data being 2022, and 2023 onward are based on NO_COVID
+* Currency: 2023 USD
+* Estimates: 500 draws, and stats (mean + 95% CI)
+* Scenarios: reference (0), worse (-1), better (1)

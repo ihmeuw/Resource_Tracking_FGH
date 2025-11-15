@@ -1,0 +1,13 @@
+
+For FGH 2024, 2 major edits:  
+
+- We implemented ad-hoc recipient country updates for the UN channels - due to the late nature of these changes they were added in compiling rather than to the channels. This will certainly not be needed in the future, so the `0b_un_recipient` directory won't be needed and the `4b.2_recip_impute_fgh2024.R` script won't be needed.  
+
+- We also implemented a post-compiling prediction stage which is what the `7b_fgh2024_predict2025plus` directory currently handles. If that doesn't get used in future work, the 7* scripts may need some modification.  
+
+- In general, the 7* scripts provide a new level of standardization for the retrospective data - a more modern version of the ADB PDB designed to be more user friendly and more efficient for common analyses peformed by the team.
+
+
+See README.md for more details on the traditional compiling pipeline
+
+

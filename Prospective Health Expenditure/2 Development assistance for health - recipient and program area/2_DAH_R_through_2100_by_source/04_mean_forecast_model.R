@@ -1,0 +1,355 @@
+############################################
+### Author: USERNAME
+### Purpose: Run submodel mean estimates using TBM, holding out OOS years and assessing submodel goodness of fit 
+############################################
+
+rm(list = ls())
+
+library(AFModel)
+
+################################################
+## (1) Get model information
+################################################
+
+## Open the parser
+args <- commandArgs(trailingOnly = TRUE)
+source <- args[1]
+model <- as.numeric(args[2])
+variable <- args[3]
+date <- args[4]
+comment <- args[5]
+repo_path <- args[6]
+
+print("Get grid")
+root_fold <- 'FILEPATH'
+load(paste0(root_fold, 'FILEPATH'))
+
+print("Getting model info")
+model_info <- get_model_specs(full_grid, model, draws = F)
+print(paste0("Running model number ", model, " with the following specifications: "))
+print(model_info)
+
+
+record_model_and_stop_hack <- function (model, root_fold, date = gsub("-", "", Sys.Date()), type) 
+{
+  if (!(type %in% c("passed", "failed"))) {
+    stop("Neither passed or failed")
+  }
+  paste0(root_fold, "/", type)
+  system(paste0("echo ", model, " >> ", root_fold, "/", type, "/", model, ".txt"))
+  if (type == "passed") {
+    print(paste0("Model run sucessfull! Saved out empty file in : ", 
+                 root_fold, 
+                 "/", type, "/", model, ".txt"))
+    q("no")
+  }
+  else if (type == "failed") {
+    print(paste0("Model run failed. Saved out empty file in : ", 
+                 root_fold, 
+                 "/", type, "/", model, ".txt"))
+    q("no")
+  }
+}
+
+################################################
+## (2) Prep all data with covariates
+################################################
+
+## Bring in full data
+input_data <- fread(gsub(".csv", paste0("_", source, ".csv"), metadata_list$prepped_inputs_path))
+input_data <- input_data[year >= eval(metadata_list$start_year - 1) & year <= metadata_list$end_FC]
+
+if(metadata_list$no_covid_model) {
+  input_data <- copy(input_data)[year > 2019, paste0(model_info$yvar) := NA] # dropping COVID-sensitive 2020/2021 data
+} else {
+  input_data <- copy(input_data)
+}
+
+input_data[, year_id := as.numeric(year) - min(year)]
+
+
+## Create scaled maxxer for convergence
+input_data[, conv_scaler := max(get(gsub("ln\\_|logit\\_", "", model_info$yvar)), na.rm = T)]
+input_data[, Y_scaled_conv := shift(get(gsub("ln\\_|logit\\_", "", model_info$yvar)) / conv_scaler), by = "iso3"]
+
+## Drop non-country donors
+input_data <- input_data[!(iso3 %in% c("OTH", "INKIND", "WLD", "UNALLOCABLE_DAH_INK", "UNALLOCABLE_DAH_WLD", "UNALLOCABLE_DAH_QZA"))]
+
+zero_countries <- input_data[year==metadata_list$end_fit & dah_recip==0 & dah_recip_total==0]$iso3
+input_data <- input_data[!(iso3 %in% as.character(zero_countries))]
+
+################################################
+## (3) Prepping for TMB
+################################################
+
+data_params <- make_data_param(
+  input_data = input_data,
+  yvar = model_info$yvar,
+  xvar = model_info$xvar,
+  REs = "iso3",
+  global_int = model_info$global_int,
+  country_int = model_info$country_int,
+  country_int_dist = model_info$country_int_dist,
+  re_vars = model_info$re_coef,
+  ar_mod = model_info$ar_mod, ar = model_info$ar,
+  ma_mod = model_info$ma_mod, ma = model_info$ma,
+  fd = model_info$fdiff,
+  weight_decay = model_info$weight_decay,
+  conv = model_info$conv,
+  scaled_lev_conv = model_info$scaled_lev_conv,
+  start_year = metadata_list$start_year,
+  end_fit = metadata_list$end_fit,
+  end_FC = metadata_list$end_FC,
+  chaos = metadata_list$chaos,
+  ar_constrain = model_info$ar_constrain,
+  int_decay = model_info$int_decay
+)
+
+
+################################################
+#### Full Sample Model Run ###
+################################################
+
+
+
+################################################
+## (3.1) Compile, optimize and fit
+################################################
+
+
+system.time(tryCatch(output_TMB <- run_model(
+  data_params = data_params,
+  model = "AFModel",
+  verbose = F
+),
+error = function(e) {
+  print(paste0("Model couldn't be run: ", e))
+  record_model_and_stop_hack(model, root_fold, type = "failed")
+}
+))
+
+
+## Stop if false convergence but FC_model still evaluated, or we have NaNs in SEs
+if (output_TMB$opt$convergence == 1 | output_TMB$FC_model$pdHess == F | any(is.nan(summary(output_TMB$FC_model)[, 2]))) {
+  print("False convergence, or evaluation limit reached, or NaNs in SEs in main regression. Stopping script")
+  record_model_and_stop_hack(model, root_fold, type = "failed")
+}
+
+
+################################################
+## (3.2) Prediction block
+################################################
+
+
+### Make a dataset for mean estimation data
+mean_est_data <- prep_data_for_forecast(tmb_obj = output_TMB$obj, 
+                                        tmb_data_param = data_params)
+
+### Forecast
+mean_forecast <- make_forecast(mean_est_data_obj = mean_est_data, 
+                               tmb_output_object = output_TMB, 
+                               tmb_data_param = data_params, add_residual = F, 
+                               transform = "invlogit")
+
+print("Mean forecast predicted")
+
+
+################################################
+## (3.3) Exclusion criteria test block
+################################################
+
+
+## Test whether the coefficients are statistically significant
+stat_sig_test <- test_sig(output_TMB, rigorous = T, avoid_coefs = c('loggroup'))
+
+
+## Test for growth rate bounds
+## Run SFA models first
+sfa_model <- sfa_bounds(data = input_data, depvar = model_info$yvar, 
+                        transform = "logit", panelvar = "iso3", yearvar = "year")
+
+## Test bounds
+bounds_test <- test_bounds(
+  data = mean_forecast,
+  depvar = "yvar",
+  rev_trans = "invlogit",
+  predict_years = c(metadata_list$end_fit, metadata_list$end_FC),
+  panelvar = "iso3",
+  yearvar = "year",
+  sfa_output = sfa_model,
+  threshold = 20
+)
+
+
+## Test for empirical priors
+
+## If all of our bounds failed, stop model
+if (sum(stat_sig_test, bounds_test) != 2) {
+  print("This model did not pass all of the exclusion criteria.")
+  record_model_and_stop_hack(model, root_fold, type = "failed")
+}
+
+
+################################################
+## (3.4) Create residuals
+################################################
+
+residuals <- create_residuals(tmb_output_obj = output_TMB, tmb_data_param = data_params)
+
+## Get the statistics from the residuals (MAD, median, mean, SD, etc)
+level_resid_stats <- create_stats(data = residuals, "iso3", variable = "level_resid")
+colnames(level_resid_stats) <- c("iso3", paste0("level_", c("mean", "sd", "median", "mad")))
+diff_resid_stats <- create_stats(data = residuals, "iso3", variable = "diff_resid")
+colnames(diff_resid_stats) <- c("iso3", paste0("diff_", c("mean", "sd", "median", "mad")))
+
+## Merge the two
+resid_info <- merge(level_resid_stats, diff_resid_stats, "iso3")
+
+
+######################################################
+#### Out of Sample Model Run and Finalizing Output ###
+######################################################
+
+
+################################################
+## (4.1) Compile, optimize and fit
+################################################
+
+## Prep data for OOS
+data_params_OOS <- make_data_param(
+  input_data = input_data,
+  yvar = model_info$yvar,
+  xvar = model_info$xvar,
+  REs = "iso3",
+  global_int = model_info$global_int,
+  country_int = model_info$country_int,
+  country_int_dist = model_info$country_int_dist,
+  re_vars = NULL,
+  ar_mod = model_info$ar_mod, ar = model_info$ar,
+  ma_mod = model_info$ma_mod, ma = model_info$ma,
+  fd = model_info$fdiff,
+  weight_decay = model_info$weight_decay,
+  conv = model_info$conv,
+  scaled_lev_conv = model_info$scaled_lev_conv,
+  start_year = metadata_list$start_year,
+  end_fit = eval(metadata_list$end_fit - metadata_list$oos_years),
+  end_FC = metadata_list$end_fit,
+  chaos = metadata_list$chaos,
+  ar_constrain = model_info$ar_constrain
+)
+
+
+system.time(tryCatch(output_TMB_OOS <- run_model(
+  data_params = data_params_OOS,
+  model = "AFModel",
+  verbose = F
+),
+error = function(e) {
+  print(paste0("Model couldn't be run:", e))
+  record_model_and_stop_hack(model, root_fold, type = "failed")
+}
+))
+
+
+## Stop if false convergence but FC_model still evaluated
+if (output_TMB_OOS$opt$convergence == 1 | output_TMB_OOS$FC_model$pdHess == F) {
+  print("False convergence, or evaluation limit reached, or NaNs in SEs in OOS regression. Stopping script")
+  record_model_and_stop_hack(model, root_fold, type = "failed")
+}
+
+
+################################################
+## (4.2) Prediction block
+################################################
+
+
+### Make a dataset for mean estimation data
+mean_est_data_OOS <- prep_data_for_forecast(tmb_obj = output_TMB_OOS$obj, 
+                                            tmb_data_param = data_params_OOS)
+
+### Forecast
+mean_forecast_OOS <- make_forecast(
+  mean_est_data_obj = mean_est_data_OOS,
+  tmb_output_object = output_TMB_OOS,
+  tmb_data_param = data_params_OOS,
+  add_residual = F,
+  transform = "invlogit"
+)
+
+print("Mean forecast for OOS run predicted")
+
+
+################################################
+## (4.3) Generate RMSE by regions
+################################################
+
+loc_DT_regs <- unique(input_data[, .(iso3, region_name, super_region_name)])
+
+
+if (metadata_list$chaos) {
+  RMSE_data <- RMSE_generator_2(
+    mean_data = mean_forecast,
+    OOS_data = mean_forecast_OOS,
+    panelvar = "iso3",
+    yearvar = "year",
+    depvar_dt = "yvar",
+    oos_start = eval(metadata_list$end_fit - metadata_list$oos_years + 1),
+    in_sample_end = metadata_list$end_fit,
+    region_metrics = T,
+    region_data = loc_DT_regs
+  )[, model_number := model]
+} else {
+  RMSE_data <- RMSE_generator(
+    mean_data = mean_forecast,
+    OOS_data = mean_forecast_OOS,
+    panelvar = "iso3",
+    yearvar = "year",
+    depvar_dt = "yvar",
+    oos_start = eval(metadata_list$end_fit - metadata_list$oos_years + 1),
+    in_sample_end = metadata_list$end_fit,
+    region_metrics = T,
+    region_data = loc_DT_regs
+  )[, model_number := model]
+}
+
+
+## Combine the two forecasts
+colnames(mean_forecast_OOS) <- c("iso3", "year", "yvar_OOS", "ydiff_OOS")
+mean_forecast <- merge(mean_forecast, mean_forecast_OOS, c("iso3", "year"), all.x = T)
+
+################################################
+## (4.4) Save out model info
+################################################
+
+
+## Merge postfile with a shell iso3 file
+country_list_DT <- loc_DT_regs[, .(iso3, model_number = model)]
+RMSE_data <- merge(RMSE_data, country_list_DT, c("model_number", "iso3"), all.y = T)
+
+## Record postfiles
+postfile <- postfile_maker(tmb_output_obj = output_TMB, 
+                           tmb_data_param = data_params, 
+                           model_number = model)
+
+## Merge in RMSE (outer merge)
+postfile_iso <- merge(postfile, RMSE_data, "model_number", all.y = T)
+
+## Outer merge the country residual info
+postfile_iso <- merge(postfile_iso, resid_info, "iso3", all.x = T)
+
+## Save the essentials to load in later
+save(
+  list = c("postfile_iso", "output_TMB", "mean_forecast", "data_params"),
+  file = paste0(root_fold, "FILEPATH")
+)
+
+## Save the postfile info
+fwrite(
+  postfile_iso,
+  paste0(root_fold, "FILEPATH")
+)
+
+## Save the model text file in passed!
+record_model_and_stop_hack(model, root_fold, type = "passed")
+
+q("no")

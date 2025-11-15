@@ -1,0 +1,10 @@
+# GHE Forecasts 
+
+### Data specifications for FGH 2024/2025:
+* Variables: GHE
+* Number of countries: 204
+* Number of subnats: 0
+* Years: 1995-2050, with the last year of retrospective data being 2022, and 2023 onward are based on NO_COVID forecasts modeled using retrospective data through 2019
+* Currency: 2023 USD 
+* Estimates: 500 draws, and stats (mean + 95% CI)
+* Scenarios: reference (0), worse (-1), better (1)

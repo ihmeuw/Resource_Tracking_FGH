@@ -1,0 +1,37 @@
+# Creating a .gitignore to avoid our data files, and for any
+# python IDE stuff that shows up.
+
+# Python
+*.pyc
+*.egg-info
+
+# Stata
+*.dta
+
+# Excel
+*.xls
+*.xlsx
+*.csv
+
+# R
+*.Rhistory
+
+# Images
+*.pdf
+*.png
+*.tiff
+*.svg
+*.jpeg
+
+# Mac
+*.DS_Store
+*._DS_Store
+
+# LyX
+*.lyx~
+
+
+
+# Sublime crap
+e_*
+.Rproj.user
